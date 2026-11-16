@@ -75,6 +75,32 @@ creates a merge request from the worktree branch. It accepts the worktree data e
 `worktree` or as `context`, matching the other Pegg Kanban providers. The target branch is
 the worktree base, then `base_branch`, then `default_target_branch`.
 
+### Change-request routing
+
+Kanban resolves a `change_request_provider` for each card and passes it in the
+`kanban.run.prepare` and `kanban.card.succeeded` payloads. This plugin handles both hooks
+only when that value is `gitlab` (or, for older Kanban versions that omit the field, when
+the issue provider is `gitlab`). The issue comment is only posted when the issue itself
+came from GitLab, so a Jira issue routed to GitLab opens a merge request without a GitLab
+comment.
+
+To route another issue source to GitLab, set the route in the Kanban options:
+
+```json
+{
+  "plugins": {
+    "options": {
+      "kanban": {
+        "change_request_providers": {"jira": "gitlab"}
+      }
+    }
+  }
+}
+```
+
+The GitLab project is taken from the issue repo when the issue came from GitLab, and from
+`project` otherwise.
+
 ## Configuration
 
 `~/.pegg/pegg.json`:
