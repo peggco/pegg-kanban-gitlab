@@ -391,3 +391,118 @@ func TestWorktreePrepareHookNoOp(t *testing.T) {
 		t.Fatal("empty repo should not be handled")
 	}
 }
+
+func TestHookCardSucceededRoutedFromOtherProvider(t *testing.T) {
+	var noted, merged bool
+	plugin := hookPlugin(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.EscapedPath() == "/projects/group%2Fproject/issues/12/notes":
+			noted = true
+			fmt.Fprint(w, `{"id":99}`)
+		case r.Method == http.MethodPost && r.URL.EscapedPath() == "/projects/group%2Fproject/merge_requests":
+			merged = true
+			fmt.Fprint(w, `{"iid":7,"web_url":"https://gitlab.com/group/project/-/merge_requests/7","state":"opened"}`)
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	})
+
+	result := executeHookT(t, plugin, HookCardSucceeded, peggplugin.HookAction, CardSucceeded{
+		Card: Card{
+			ID:    "card-1",
+			Title: "Fix widget",
+			Body:  "Fixes the widget.",
+			Issue: &IssueRef{Provider: "jira", Repo: "ABC", Key: "ABC-12"},
+		},
+		Worktree:              &WorktreeEntry{Slug: "fix-widget", Branch: "feat/fix-widget"},
+		Summary:               "All tests passed.",
+		Feedback:              true,
+		CreateChangeRequest:   true,
+		ChangeRequestProvider: "gitlab",
+	})
+	if !result.Handled {
+		t.Fatal("card hook was not handled")
+	}
+	if noted {
+		t.Error("gitlab commented on a non-gitlab issue")
+	}
+	if !merged {
+		t.Fatal("merge request was not created")
+	}
+}
+
+func TestHookCardSucceededNotRouted(t *testing.T) {
+	plugin := hookPlugin(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+	})
+	result := executeHookT(t, plugin, HookCardSucceeded, peggplugin.HookAction, CardSucceeded{
+		Card: Card{
+			ID:    "card-1",
+			Title: "Fix widget",
+			Issue: &IssueRef{Provider: "jira", Repo: "ABC", Key: "ABC-12"},
+		},
+		Worktree:              &WorktreeEntry{Slug: "fix-widget", Branch: "feat/fix-widget"},
+		CreateChangeRequest:   true,
+		ChangeRequestProvider: "bitbucket",
+	})
+	if result.Handled {
+		t.Fatal("card hook should not be handled for another change request provider")
+	}
+}
+
+func TestHookRunPrepareRouting(t *testing.T) {
+	repo := initGitRepo(t)
+	plugin := &Plugin{settings: Settings{
+		Enabled:             true,
+		WorktreeRoot:        ".pegg-worktrees",
+		DefaultTargetBranch: "main",
+	}}
+	payload, _ := json.Marshal(RunPrepare{
+		Card:                  Card{ID: "card-abc", Title: "Fix login"},
+		Repo:                  repo,
+		BaseBranch:            "main",
+		ChangeRequestProvider: "bitbucket",
+		Context:               RunContext{Kind: "repo", Path: repo},
+	})
+	result, err := plugin.ExecuteHook(peggplugin.HookRequest{Name: HookRunPrepare, Value: payload})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Handled {
+		t.Fatal("run.prepare should not be handled for another change request provider")
+	}
+
+	payload, _ = json.Marshal(RunPrepare{
+		Card:                  Card{ID: "card-abc", Title: "Fix login"},
+		Repo:                  repo,
+		BaseBranch:            "main",
+		ChangeRequestProvider: "gitlab",
+		Context:               RunContext{Kind: "repo", Path: repo},
+	})
+	result, err = plugin.ExecuteHook(peggplugin.HookRequest{Name: HookRunPrepare, Value: payload})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Handled {
+		t.Fatal("run.prepare should be handled for gitlab")
+	}
+}
+
+func TestHookRunPrepareSkipsNonGitRepo(t *testing.T) {
+	dir := t.TempDir()
+	plugin := &Plugin{settings: Settings{Enabled: true, WorktreeRoot: ".pegg-worktrees", DefaultTargetBranch: "main"}}
+	payload, _ := json.Marshal(RunPrepare{
+		Card:                  Card{ID: "card-abc", Title: "Fix login"},
+		Repo:                  dir,
+		BaseBranch:            "main",
+		ChangeRequestProvider: "gitlab",
+		Context:               RunContext{Kind: "repo", Path: dir},
+	})
+	result, err := plugin.ExecuteHook(peggplugin.HookRequest{Name: HookRunPrepare, Value: payload})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Handled {
+		t.Fatal("run.prepare should be skipped for a non-git repository")
+	}
+}

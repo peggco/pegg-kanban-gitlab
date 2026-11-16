@@ -28,6 +28,7 @@ type ProviderInfo struct {
 	Detail        string `json:"detail,omitempty"`
 	Target        string `json:"target,omitempty"`
 	SyncMinutes   int    `json:"sync_minutes,omitempty"`
+	RepoTarget    bool   `json:"repo_target,omitempty"`
 }
 
 type HookIssue struct {
@@ -80,14 +81,15 @@ type Card struct {
 }
 
 type CardSucceeded struct {
-	Card                Card           `json:"card"`
-	Worktree            *WorktreeEntry `json:"worktree,omitempty"`
-	Context             *RunContext    `json:"context,omitempty"`
-	Summary             string         `json:"summary,omitempty"`
-	Feedback            bool           `json:"feedback"`
-	CreateChangeRequest bool           `json:"create_change_request"`
-	TransitionOnSuccess string         `json:"transition_on_success,omitempty"`
-	BaseBranch          string         `json:"base_branch,omitempty"`
+	Card                  Card           `json:"card"`
+	Worktree              *WorktreeEntry `json:"worktree,omitempty"`
+	Context               *RunContext    `json:"context,omitempty"`
+	Summary               string         `json:"summary,omitempty"`
+	Feedback              bool           `json:"feedback"`
+	CreateChangeRequest   bool           `json:"create_change_request"`
+	ChangeRequestProvider string         `json:"change_request_provider,omitempty"`
+	TransitionOnSuccess   string         `json:"transition_on_success,omitempty"`
+	BaseBranch            string         `json:"base_branch,omitempty"`
 }
 
 type RunContext struct {
@@ -101,10 +103,11 @@ type RunContext struct {
 }
 
 type RunPrepare struct {
-	Card       Card       `json:"card"`
-	Repo       string     `json:"repo"`
-	BaseBranch string     `json:"base_branch,omitempty"`
-	Context    RunContext `json:"context"`
+	Card                  Card       `json:"card"`
+	Repo                  string     `json:"repo"`
+	BaseBranch            string     `json:"base_branch,omitempty"`
+	ChangeRequestProvider string     `json:"change_request_provider,omitempty"`
+	Context               RunContext `json:"context"`
 }
 
 func (p *Plugin) Hooks() ([]peggplugin.HookSpec, error) {
@@ -202,6 +205,7 @@ func providerInfo(settings Settings) ProviderInfo {
 		Authenticated: authenticated,
 		Detail:        providerDetail(settings, authenticated, target),
 		Target:        target,
+		RepoTarget:    true,
 	}
 }
 
@@ -279,7 +283,7 @@ func hookRunPrepare(settings Settings, req peggplugin.HookRequest) (*peggplugin.
 			return nil, fmt.Errorf("decode %s payload: %w", HookRunPrepare, err)
 		}
 	}
-	if !settings.Enabled || strings.TrimSpace(payload.Repo) == "" {
+	if !settings.Enabled || strings.TrimSpace(payload.Repo) == "" || !handlesChangeRequest(payload.ChangeRequestProvider) || !isGitRepo(payload.Repo) {
 		return &peggplugin.HookResult{Handled: false}, nil
 	}
 
@@ -349,11 +353,24 @@ func hookCardSucceeded(settings Settings, req peggplugin.HookRequest) (*peggplug
 			return nil, fmt.Errorf("decode %s payload: %w", HookCardSucceeded, err)
 		}
 	}
-	if !settings.Enabled || payload.Card.Issue == nil || payload.Card.Issue.Provider != pluginName {
+	if !settings.Enabled {
+		return &peggplugin.HookResult{Handled: false}, nil
+	}
+	issueProvider := ""
+	if payload.Card.Issue != nil {
+		issueProvider = strings.TrimSpace(payload.Card.Issue.Provider)
+	}
+	isIssueProvider := strings.EqualFold(issueProvider, pluginName)
+	isChangeRequestTarget := changeRequestTarget(payload.ChangeRequestProvider, isIssueProvider)
+	if !isIssueProvider && !isChangeRequestTarget {
 		return &peggplugin.HookResult{Handled: false}, nil
 	}
 
-	settings.Project = hookTarget(payload.Card.Issue.Repo, settings.Project)
+	repo := ""
+	if isIssueProvider && payload.Card.Issue != nil {
+		repo = payload.Card.Issue.Repo
+	}
+	settings.Project = hookTarget(repo, settings.Project)
 	if settings.Project == "" {
 		return &peggplugin.HookResult{Handled: false}, nil
 	}
@@ -362,13 +379,13 @@ func hookCardSucceeded(settings Settings, req peggplugin.HookRequest) (*peggplug
 	defer cancel()
 	client := newClient(settings)
 
-	if payload.Feedback && strings.TrimSpace(payload.Summary) != "" {
+	if isIssueProvider && payload.Feedback && strings.TrimSpace(payload.Summary) != "" && payload.Card.Issue.Number > 0 {
 		if _, err := commentOnIssue(ctx, client, payload.Card.Issue.Number, payload.Summary); err != nil {
 			return nil, err
 		}
 	}
 
-	if payload.CreateChangeRequest {
+	if isChangeRequestTarget && payload.CreateChangeRequest {
 		branch := changeRequestBranch(payload)
 		if branch != "" {
 			targetBranch := changeRequestBase(payload, settings)
@@ -385,6 +402,31 @@ func hookCardSucceeded(settings Settings, req peggplugin.HookRequest) (*peggplug
 	}
 
 	return &peggplugin.HookResult{Handled: true}, nil
+}
+
+func handlesChangeRequest(provider string) bool {
+	provider = strings.TrimSpace(provider)
+	if provider == "" {
+		return true
+	}
+	return strings.EqualFold(provider, pluginName)
+}
+
+func isGitRepo(path string) bool {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return false
+	}
+	_, err := gitOutput(path, "rev-parse", "--show-toplevel")
+	return err == nil
+}
+
+func changeRequestTarget(provider string, isIssueProvider bool) bool {
+	provider = strings.TrimSpace(provider)
+	if provider == "" {
+		return isIssueProvider
+	}
+	return strings.EqualFold(provider, pluginName)
 }
 
 func changeRequestBranch(payload CardSucceeded) string {
